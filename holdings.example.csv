@@ -1,0 +1,8 @@
+symbol,entry,date,benchmark,note
+# Copy this to holdings.csv (gitignored) and fill in YOUR positions.
+#   entry     = average cost (enables gain% + anchors the trailing-stop high)
+#   date      = entry date YYYY-MM-DD (trailing-stop high measured from here; blank = last 6mo)
+#   benchmark = relative-strength peer (blank -> SPY; e.g. a miner vs its metal)
+NVDA,100,2024-01-15,,illustrative only - replace with your book
+TLN,,,,illustrative power-gen hold
+BML.AX,,,SI=F,miner measured against its metal (peer = silver)

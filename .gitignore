@@ -1,6 +1,9 @@
 # transient outputs / caches — never commit
 cache/
 out/
+
+# personal positions — keep your real book OUT of the public repo (use holdings.example.csv)
+holdings.csv
 __pycache__/
 *.pyc
 .venv/

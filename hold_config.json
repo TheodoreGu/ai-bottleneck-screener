@@ -1,0 +1,23 @@
+{
+  "holdings_file": "holdings.csv",
+  "benchmark": "SPY",
+
+  "params": {
+    "// trend": "moving-average trend filter",
+    "sma_fast": 50,
+    "sma_slow": 200,
+    "slope_lookback": 21,
+
+    "// trailing stop": "chandelier ATR stop from the high since entry",
+    "atr_n": 22,
+    "chandelier_k": 3.0,
+    "high_lookback": 126,
+
+    "// parabolic": "blow-off / extension trim trigger",
+    "parabolic_ext": 0.60,
+    "rsi_hot": 80.0,
+    "trim_frac": 0.33
+  },
+
+  "cache_hours": 12
+}
