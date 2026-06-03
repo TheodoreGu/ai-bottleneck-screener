@@ -1,30 +1,31 @@
 """
-Signal tracker -- a live, self-auditing track record of the model's calls.
+Signal tracker -- a LIVE, forward-only paper portfolio of the model's calls.
 
-It turns the trend signal into a paper-trade ledger so you can answer "is this
-thing actually any good?" with real, dated numbers instead of vibes:
+Clean slate: inception = the day you first run it. Whatever happened before that is
+ignored -- we open every name the model currently says BUY/HOLD at the last close and
+track the portfolio from there, vs SPY. Each later run is an UPDATE: it reconciles the
+ledger against today's signals, opening new BUYs and closing names that flipped to SELL,
+keeping every position's original entry date+price. This is real, out-of-sample state --
+not recomputed from history -- so the monthly scorecard is an honest forward record.
 
-  ENTRY (model says BUY/HOLD)  : close crosses above its 50d AND 200d  -> record date+price
-  EXIT  (model says SELL)      : close drops below its 200d            -> record date+price, P&L
+  ENTRY (BUY/HOLD) : close above its 50d AND 200d  -> open at the last close
+  EXIT  (SELL)     : close below its 200d          -> close at the last close
 
-The signal is causal (no look-ahead), so the full ledger is *derived from price
-history* each run -- which means you get a track record immediately AND it keeps
-growing every month with no state to corrupt. Each closed trade is scored net of
-SPY over the identical holding window (did the call beat just owning the index?).
-
-Outputs (committed, so the record persists & is inspectable in git):
-  tracker_closed.csv   every completed paper trade
-  tracker_open.csv     positions the model currently says HOLD (with unrealised P&L)
-  tracker_report.md    the read: open book + monthly hit-rate/return vs SPY + lifetime
+State (committed, so the record persists & survives in git):
+  tracker_state.json   inception date + bookkeeping
+  tracker_open.csv     positions currently held (original entry date/price kept)
+  tracker_closed.csv   completed trades
+  tracker_report.md    the read: open book, monthly portfolio-vs-SPY, lifetime
 
 Usage
-  python tracker.py                      # AI-bottleneck universe, 3y of history
-  python tracker.py --period 5y
-  python tracker.py --symbols AMD NVDA TLN
+  python tracker.py                 # update (auto-inceptions on first run)
+  python tracker.py --reset         # wipe the ledger and re-inception at today's last close
+  python tracker.py --period 2y
 """
 from __future__ import annotations
 
 import csv
+import json
 import argparse
 import datetime as dt
 from pathlib import Path
@@ -36,6 +37,10 @@ import sources
 
 ROOT = Path(__file__).parent
 FAST, SLOW = 50, 200
+STATE = ROOT / "tracker_state.json"
+OPEN_F = ROOT / "tracker_open.csv"
+CLOSED_F = ROOT / "tracker_closed.csv"
+REPORT = ROOT / "tracker_report.md"
 
 
 def load_universe(path: Path) -> list[dict]:
@@ -52,145 +57,196 @@ def load_universe(path: Path) -> list[dict]:
     return rows
 
 
-def _spy_ret(spy: pd.Series, d0, d1) -> float:
-    try:
-        a, b = spy.asof(d0), spy.asof(d1)
-        return float(b / a - 1) if a and b and a > 0 else float("nan")
-    except Exception:
-        return float("nan")
+def _read_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    df = pd.read_csv(path)
+    return df.to_dict("records") if len(df) else []
 
 
-def segment(df: pd.DataFrame, spy: pd.Series, layer: str, sym: str) -> tuple[list[dict], dict | None]:
-    """Split one name's history into trend trades (closed list + current open, if any)."""
+def _signal(df: pd.DataFrame) -> tuple[str, float, str] | None:
+    """Return (signal, last_close, last_date) where signal in {'in','out'} or None."""
     close = df["Close"].dropna()
-    if len(close) < SLOW + 5:
-        return [], None
-    sf = close.rolling(FAST).mean().values
-    ss = close.rolling(SLOW).mean().values
-    c = close.values
-    idx = close.index
-    spans, inpos, e_i = [], False, None
-    for i in range(len(c)):
-        if np.isnan(ss[i]):
-            continue
-        if not inpos:
-            if c[i] > ss[i] and c[i] > sf[i]:
-                inpos, e_i = True, i
-        elif c[i] < ss[i]:
-            spans.append((e_i, i))
-            inpos = False
-    open_span = (e_i, None) if inpos else None
-
-    def rec(ei, xi):
-        ed, ep = idx[ei], float(c[ei])
-        closed = xi is not None
-        xd, xp = (idx[xi], float(c[xi])) if closed else (idx[-1], float(c[-1]))
-        ret = xp / ep - 1
-        spy_r = _spy_ret(spy, ed, xd)
-        return {"symbol": sym, "layer": layer,
-                "entry_date": ed.date().isoformat(), "entry": round(ep, 2),
-                "exit_date": xd.date().isoformat(), "exit": round(xp, 2),
-                "ret": ret, "days": (xd - ed).days,
-                "spy_ret": spy_r, "excess": ret - spy_r if spy_r == spy_r else float("nan"),
-                "open": not closed}
-
-    return [rec(e, x) for e, x in spans], (rec(*open_span) if open_span else None)
+    if len(close) < SLOW + 1:
+        return None
+    s_f = close.rolling(FAST).mean().iloc[-1]
+    s_s = close.rolling(SLOW).mean().iloc[-1]
+    last = float(close.iloc[-1])
+    if not (s_s == s_s):
+        return None
+    if last < s_s:
+        sig = "out"                                   # below 200d -> SELL/flat
+    elif last > s_s and last > s_f:
+        sig = "in"                                    # above 50 & 200d -> BUY/HOLD
+    else:
+        sig = "between"                               # above 200 but below 50d -> no fresh entry
+    return sig, last, close.index[-1].date().isoformat()
 
 
-def run(symbols: list[str], layers: dict, period: str) -> None:
-    fetch = list(dict.fromkeys(symbols + ["SPY"]))
-    prices = sources.fetch_prices(fetch, period=period)
+def run(symbols: list[str], layers: dict, period: str, reset: bool) -> None:
+    prices = sources.fetch_prices(list(dict.fromkeys(symbols + ["SPY"])), period=period)
     spy = prices["SPY"]["Close"].dropna() if "SPY" in prices else pd.Series(dtype=float)
-    print(f"[tracker] {len(symbols)} names | prices {len(prices)}/{len(fetch)} | period {period}")
 
-    closed, opens = [], []
+    sigs: dict[str, tuple] = {}
     for s in symbols:
         df = prices.get(s)
-        if df is None or df.empty:
-            continue
-        cl, op = segment(df, spy, layers.get(s, ""), s)
-        closed.extend(cl)
-        if op:
-            opens.append(op)
+        if df is not None and not df.empty:
+            r = _signal(df)
+            if r:
+                sigs[s] = r
 
-    _write_csv(ROOT / "tracker_closed.csv", closed)
-    _write_csv(ROOT / "tracker_open.csv", opens)
-    _report(closed, opens, period)
+    fresh = reset or not STATE.exists()
+    open_rows = [] if fresh else _read_csv(OPEN_F)
+    closed_rows = [] if fresh else _read_csv(CLOSED_F)
+    open_by = {r["symbol"]: r for r in open_rows}
+
+    if fresh:
+        inception = dt.date.today().isoformat()
+        for s, (sig, last, ldate) in sigs.items():
+            if sig == "in":
+                open_by[s] = {"symbol": s, "layer": layers.get(s, ""),
+                              "entry_date": ldate, "entry": round(last, 2)}
+        action = f"INCEPTION {inception} — opened {len(open_by)} positions at last close"
+    else:
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+        inception = state["inception"]
+        opened = closed = 0
+        for s, (sig, last, ldate) in sigs.items():
+            if s in open_by and sig == "out":                 # flipped to SELL -> close
+                e = open_by.pop(s)
+                ep = float(e["entry"])
+                closed_rows.append({**e, "exit_date": ldate, "exit": round(last, 2),
+                                    "ret": last / ep - 1,
+                                    "days": (dt.date.fromisoformat(ldate)
+                                             - dt.date.fromisoformat(str(e["entry_date"]))).days})
+                closed += 1
+            elif s not in open_by and sig == "in":            # fresh BUY -> open
+                open_by[s] = {"symbol": s, "layer": layers.get(s, ""),
+                              "entry_date": ldate, "entry": round(last, 2)}
+                opened += 1
+        action = f"update — opened {opened}, closed {closed}"
+
+    open_rows = list(open_by.values())
+    _save(open_rows, closed_rows, inception)
+    print(f"[tracker] {action} | {len(open_rows)} open | {len(closed_rows)} closed")
+    _report(open_rows, closed_rows, inception, sigs, prices, spy)
 
 
-def _write_csv(path: Path, rows: list[dict]) -> None:
-    cols = ["symbol", "layer", "entry_date", "entry", "exit_date", "exit",
-            "ret", "days", "spy_ret", "excess", "open"]
-    df = pd.DataFrame(rows, columns=cols)
-    df.to_csv(path, index=False)
+def _save(open_rows, closed_rows, inception) -> None:
+    pd.DataFrame(open_rows, columns=["symbol", "layer", "entry_date", "entry"]).to_csv(OPEN_F, index=False)
+    pd.DataFrame(closed_rows,
+                 columns=["symbol", "layer", "entry_date", "entry", "exit_date", "exit", "ret", "days"]
+                 ).to_csv(CLOSED_F, index=False)
+    STATE.write_text(json.dumps({"inception": inception,
+                                 "updated": dt.date.today().isoformat()}, indent=2), encoding="utf-8")
 
 
 def _pct(x) -> str:
     return f"{x*100:+.0f}%" if x == x else "  -"
 
 
-def _report(closed: list[dict], opens: list[dict], period: str) -> None:
+def _equity_curve(open_rows, closed_rows, prices, inception):
+    """Equal-weight, daily-rebalanced paper portfolio from inception -> now."""
+    inc = pd.Timestamp(inception)
+    intervals = [(r["symbol"], pd.Timestamp(r["entry_date"]), None) for r in open_rows] + \
+                [(r["symbol"], pd.Timestamp(r["entry_date"]), pd.Timestamp(r["exit_date"]))
+                 for r in closed_rows]
+    if not intervals:
+        return None
+    # daily returns per symbol, aligned to a common calendar from inception
+    rets = {}
+    for sym in {i[0] for i in intervals}:
+        df = prices.get(sym)
+        if df is not None and not df.empty:
+            rets[sym] = df["Close"].dropna().pct_change()
+    cal = None
+    for sym in rets:
+        idx = rets[sym].index[rets[sym].index >= inc]
+        cal = idx if cal is None else cal.union(idx)
+    if cal is None or len(cal) == 0:
+        return None
+    port = pd.Series(0.0, index=cal)
+    for t in cal:
+        held = [sym for sym, e, x in intervals if e < t and (x is None or t <= x) and sym in rets]
+        if held:
+            vals = [rets[sym].get(t, np.nan) for sym in held]
+            vals = [v for v in vals if v == v]
+            if vals:
+                port[t] = float(np.mean(vals))
+    return (1 + port).cumprod()
+
+
+def _report(open_rows, closed_rows, inception, sigs, prices, spy) -> None:
     today = dt.date.today()
+    now = pd.Timestamp(today)
     L = [f"# Signal tracker - {today:%Y-%m-%d}",
-         f"_universe: AI-bottleneck | signal: long while >200d (enter >50&200d), exit <200d | "
-         f"history: {period} | scored net of SPY_",
+         f"_LIVE paper portfolio · inception **{inception}** · AI-bottleneck universe · "
+         f"signal: long >50&200d, exit <200d · equal-weight vs SPY_",
          ""]
 
-    # ---- open book (the model's current BUY/HOLD calls) ----
-    L.append("## Open positions — model currently says HOLD")
+    # mark open book to market
+    L.append("## Open positions — model says HOLD")
     L.append("```")
-    L.append(f"{'SYM':<6}{'entry':>9}{'on':>12}{'last':>9}{'unreal':>8}{'vsSPY':>7}{'days':>6}")
-    for r in sorted(opens, key=lambda r: r["excess"] if r["excess"] == r["excess"] else -9, reverse=True):
-        L.append(f"{r['symbol']:<6}{r['entry']:>9.2f}{r['entry_date']:>12}{r['exit']:>9.2f}"
-                 f"{_pct(r['ret']):>8}{_pct(r['excess']):>7}{r['days']:>6}")
+    L.append(f"{'SYM':<6}{'entry':>9}{'on':>12}{'last':>9}{'P&L':>7}{'vsSPY':>7}{'days':>6}")
+    book = []
+    for r in open_rows:
+        sym = r["symbol"]
+        last = sigs[sym][1] if sym in sigs else float("nan")
+        ep = float(r["entry"])
+        ret = last / ep - 1 if last == last else float("nan")
+        ed = pd.Timestamp(r["entry_date"])
+        spy_r = float(spy.asof(now) / spy.asof(ed) - 1) if len(spy) else float("nan")
+        ex = ret - spy_r if (ret == ret and spy_r == spy_r) else float("nan")
+        days = (today - ed.date()).days
+        book.append((sym, ep, str(r["entry_date"]), last, ret, ex, days))
+    for sym, ep, ed, last, ret, ex, days in sorted(book, key=lambda b: b[4] if b[4] == b[4] else -9, reverse=True):
+        L.append(f"{sym:<6}{ep:>9.2f}{ed:>12}{last:>9.2f}{_pct(ret):>7}{_pct(ex):>7}{days:>6}")
     L.append("```")
-    if opens:
-        avg_un = np.nanmean([r["ret"] for r in opens])
-        avg_ex = np.nanmean([r["excess"] for r in opens])
-        L.append(f"_{len(opens)} open · avg unrealised {_pct(avg_un)} · avg vs SPY {_pct(avg_ex)}_")
+    if book:
+        L.append(f"_{len(book)} open · avg P&L {_pct(np.nanmean([b[4] for b in book]))} · "
+                 f"avg vs SPY {_pct(np.nanmean([b[5] for b in book]))}_")
 
-    # ---- monthly track record (closed trades, by exit month) ----
-    L.append("\n## Closed trades — by exit month")
+    # portfolio equity curve -> monthly vs SPY
+    eq = _equity_curve(open_rows, closed_rows, prices, inception)
+    L.append("\n## Monthly — equal-weight portfolio vs SPY")
     L.append("```")
-    L.append(f"{'month':<9}{'n':>4}{'win%':>6}{'avgRet':>8}{'vsSPY':>7}")
-    if closed:
-        cdf = pd.DataFrame(closed)
-        cdf["m"] = pd.to_datetime(cdf["exit_date"]).dt.to_period("M").astype(str)
-        for m, g in cdf.groupby("m"):
-            L.append(f"{m:<9}{len(g):>4}{100*(g['ret']>0).mean():>5.0f}%"
-                     f"{_pct(g['ret'].mean()):>8}{_pct(g['excess'].mean()):>7}")
-    L.append("```")
-
-    # ---- lifetime summary ----
-    L.append("\n## Lifetime")
-    if closed:
-        cdf = pd.DataFrame(closed)
-        n = len(cdf)
-        win = (cdf["ret"] > 0).mean()
-        beat = (cdf["excess"] > 0).mean()
-        L += [
-            f"- **{n} closed trades** · win rate **{win*100:.0f}%** · beat SPY **{beat*100:.0f}%** of the time",
-            f"- avg return **{_pct(cdf['ret'].mean())}** (median {_pct(cdf['ret'].median())}) · "
-            f"avg excess vs SPY **{_pct(cdf['excess'].mean())}**",
-            f"- avg winner {_pct(cdf.loc[cdf['ret']>0,'ret'].mean())} · "
-            f"avg loser {_pct(cdf.loc[cdf['ret']<=0,'ret'].mean())} · "
-            f"avg hold {cdf['days'].mean():.0f}d",
-            f"- best {_pct(cdf['ret'].max())} ({cdf.loc[cdf['ret'].idxmax(),'symbol']}) · "
-            f"worst {_pct(cdf['ret'].min())} ({cdf.loc[cdf['ret'].idxmin(),'symbol']})",
-        ]
+    L.append(f"{'month':<9}{'port':>8}{'SPY':>8}{'diff':>8}")
+    if eq is not None and len(eq) > 1:
+        pm = (1 + eq.pct_change()).resample("ME").prod() - 1
+        sm = (1 + spy.reindex(eq.index).pct_change()).resample("ME").prod() - 1
+        for m in pm.index:
+            p, s = pm.get(m, np.nan), sm.get(m, np.nan)
+            L.append(f"{m.strftime('%Y-%m'):<9}{_pct(p):>8}{_pct(s):>8}{_pct(p-s):>8}")
+        tot_p = float(eq.iloc[-1] - 1)
+        tot_s = float(spy.asof(now) / spy.asof(pd.Timestamp(inception)) - 1) if len(spy) else float("nan")
+        L.append("```")
+        L.append(f"_since inception: portfolio {_pct(tot_p)} · SPY {_pct(tot_s)} · "
+                 f"**{_pct(tot_p-tot_s)} vs SPY**_")
     else:
-        L.append("- _no closed trades yet — all signals still open_")
-    L.append(f"- {len(opens)} positions currently open (marked-to-market above)")
+        L.append("```")
+        L.append("_inception today — performance accrues from the next session. Come back tomorrow._")
+
+    # lifetime closed-trade stats
+    L.append("\n## Closed trades (lifetime)")
+    if closed_rows:
+        cdf = pd.DataFrame(closed_rows)
+        L += [f"- **{len(cdf)} closed** · win rate **{100*(cdf['ret']>0).mean():.0f}%** · "
+              f"avg {_pct(cdf['ret'].mean())} · avg hold {cdf['days'].mean():.0f}d",
+              f"- best {_pct(cdf['ret'].max())} ({cdf.loc[cdf['ret'].idxmax(),'symbol']}) · "
+              f"worst {_pct(cdf['ret'].min())} ({cdf.loc[cdf['ret'].idxmin(),'symbol']})"]
+    else:
+        L.append("- _none yet — every position still open (clean slate)._")
 
     text = "\n".join(L)
-    (ROOT / "tracker_report.md").write_text(text, encoding="utf-8")
-    print("[out] tracker_closed.csv / tracker_open.csv / tracker_report.md\n")
+    REPORT.write_text(text, encoding="utf-8")
+    print("[out] tracker_state.json / tracker_open.csv / tracker_closed.csv / tracker_report.md\n")
     print(text)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--period", default="3y", help="history window (e.g. 3y, 5y, max)")
+    ap.add_argument("--period", default="2y", help="history window for the 50/200d signal")
+    ap.add_argument("--reset", action="store_true", help="wipe ledger and re-inception today")
     ap.add_argument("--symbols", nargs="+", help="ad-hoc list; default = ai_universe.csv")
     a = ap.parse_args()
     if a.symbols:
@@ -199,7 +255,7 @@ def main() -> None:
         uni = load_universe(ROOT / "ai_universe.csv")
         symbols = [u["symbol"] for u in uni]
         layers = {u["symbol"]: u["layer"] for u in uni}
-    run(symbols, layers, a.period)
+    run(symbols, layers, a.period, a.reset)
 
 
 if __name__ == "__main__":
