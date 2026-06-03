@@ -99,36 +99,68 @@ def fetch_institutional(symbols: list[str], cache_hours: float = 24) -> dict[str
 #  2. Dataroma superinvestors  (scrape per ticker, cached 7d -> 13F is quarterly)
 # --------------------------------------------------------------------------- #
 # stock.php rows look like:
-#   <a href="/m/holdings.php?m=LPC" ...>Manager</a> ... <td class="buy">Add 40.65%</td>
-# A brand-new position this quarter shows activity text == "Buy" (Add/Reduce/Sell otherwise).
+#   <td class="firm"><a href="/m/holdings.php?m=LPC" ...>Stephen Mandel - Lone Pine Capital</a>
+#   ... <td class="buy">Add 40.65%</td>
+# Activity text: "Buy" = brand-new position this quarter; "Add x%"; "Reduce x%"; "Sell"; blank=hold.
 _HOLDER_RE = re.compile(
-    r'holdings\.php\?m=([A-Za-z0-9]+)"[^>]*>.*?<td class="(buy|sell)">\s*([^<]*?)\s*</td>',
+    r'holdings\.php\?m=([A-Za-z0-9]+)"[^>]*>\s*([^<]+?)\s*</a>.*?'
+    r'<td class="(?:buy|sell)">\s*([^<]*?)\s*</td>',
     re.S)
+
+# generic firm-name suffixes to drop so the column stays short ("Lone Pine Capital" -> "Lone Pine")
+_FIRM_DROP = {"capital", "management", "asset", "advisors", "advisers", "partners",
+              "llc", "lp", "inc", "co", "company", "group", "fund", "funds",
+              "holdings", "investments", "investment", "&", "and", "the"}
+
+
+def _short_fund(name: str) -> str:
+    """'Stephen Mandel - Lone Pine Capital' -> 'Lone Pine'.  Keep it <=12 chars."""
+    firm = name.split(" - ")[-1].strip() if " - " in name else name.strip()
+    toks = [t for t in re.split(r"\s+", firm) if t.lower().strip(".,") not in _FIRM_DROP]
+    short = " ".join(toks[:2]) if toks else firm
+    return short[:12]
 
 
 def _scrape_dataroma_stock(sym: str) -> dict | None:
-    """Return {dr_count, dr_new, holders:[mgr,...]} for `sym`, or None on failure.
+    """Return {dr_count, dr_new, holders, sm_money} for `sym`, or None on failure.
 
     dr_count = distinct tracked superinvestors holding it.
     dr_new   = how many INITIATED a brand-new position this quarter (activity 'Buy').
     holders  = manager codes (used by fetch_first_included to date the inception).
+    sm_money = compact display of WHO is in it, adders first: 'Lone Pine* Oaktree+'
+               ( * = new position this quarter, + = adding to it ).
     """
     url = f"https://www.dataroma.com/m/stock.php?sym={sym}"
     try:
         r = requests.get(url, headers=_UA, timeout=25)
         if r.status_code != 200 or len(r.text) < 500:
             return None
-        holders, new = [], 0
-        for mgr, _cls, act in _HOLDER_RE.findall(r.text):
-            holders.append(mgr)
-            if act.strip().lower() == "buy":          # exact 'Buy' = initiation (vs 'Add x%')
-                new += 1
-        # fall back to a plain code count if the structured parse found nothing
-        if not holders:
+        rows = _HOLDER_RE.findall(r.text)   # [(code, name, activity), ...] in portfolio-% order
+        if not rows:
             codes = set(re.findall(r"holdings\.php\?m=([A-Za-z0-9]+)", r.text))
-            return {"dr_count": len(codes), "dr_new": 0, "holders": list(codes)}
+            return {"dr_count": len(codes), "dr_new": 0, "holders": list(codes), "sm_money": ""}
+
+        holders, new = [], 0
+        adders, top_holders = [], []          # adders: (short, '*'|'+') ; top_holders: short names
+        for mgr, name, act in rows:
+            holders.append(mgr)
+            short = _short_fund(name)
+            top_holders.append(short)
+            a = act.strip().lower()
+            if a == "buy" or a.startswith("buy"):
+                new += 1
+                adders.append((short, "*"))    # brand-new position
+            elif a.startswith("add"):
+                adders.append((short, "+"))     # adding to existing
         seen = list(dict.fromkeys(holders))
-        return {"dr_count": len(seen), "dr_new": new, "holders": seen}
+
+        # build the "who's in it" string: new buys first, then adds, else fall back to top holders
+        adders.sort(key=lambda t: 0 if t[1] == "*" else 1)
+        if adders:
+            disp = " ".join(f"{s}{m}" for s, m in adders[:2])
+        else:
+            disp = " ".join(dict.fromkeys(top_holders[:2]))   # nobody adding -> largest holders
+        return {"dr_count": len(seen), "dr_new": new, "holders": seen, "sm_money": disp[:24]}
     except Exception:
         return None
 
@@ -141,7 +173,7 @@ def fetch_superinvestors(symbols: list[str], cache_hours: float = 168) -> dict[s
     out: dict[str, dict] = {}
     for sym in symbols:
         rec = store.get(sym)
-        if rec and (now - rec.get("_ts", 0)) < cache_hours * 3600 and "holders" in rec:
+        if rec and (now - rec.get("_ts", 0)) < cache_hours * 3600 and "sm_money" in rec:
             out[sym] = rec
             continue
         scraped = _scrape_dataroma_stock(sym) or {"dr_count": None, "dr_new": None, "holders": []}

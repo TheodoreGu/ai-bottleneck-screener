@@ -173,6 +173,7 @@ def run(cfg: dict, args) -> None:
         row.update(sm_fields)
         row["_sm"] = sm
         row["_sm_note"] = sm_note
+        row["sm_money"] = (supr.get(sym) or {}).get("sm_money", "")   # who's in it (adders first)
 
         lag, lag_flags = laggard_score(row.get("ytd"), row.get("above_sma200"), th)
         mom, mom_flags = momentum_score(row, th)
@@ -214,10 +215,7 @@ def run(cfg: dict, args) -> None:
 
 
 def _note(row: dict, sm_note: str) -> str:
-    bits = []
-    ytd = row.get("ytd")
-    if ytd is not None and pd.notna(ytd):
-        bits.append(f"YTD{ytd*100:+.0f}%")
+    bits = []                                    # YTD is its own column; don't repeat it here
     rs = row.get("rs_63")
     if rs is not None and pd.notna(rs):
         bits.append(f"RS{rs*100:+.0f}%")
@@ -255,18 +253,23 @@ def _write_digest(rows: list[dict], cfg: dict, gov_state: str, args) -> None:
          "RS+/- vs SPY | OB overbought | 52H near high | SM-INST high institutional | "
          "SM-13F superinvestors hold | SM-NEW fresh 13F initiation | SM-GOV congress buying | "
          "SINCE'YY first smart-money quarter (top tier)",
+         "_Smart money column = superinvestor(s) adding it (Dataroma): `*` new position this "
+         "quarter, `+` adding to existing; else the largest holder._",
          "",
          "```",
-         f"{'SYM':<6}{'layer':<11}{'last':>8}{'YTD':>7}{'score':>6}  {'flags':<30}note"]
+         f"{'SYM':<5}{'layer':<9}{'last':>8}{'YTD':>6}{'scr':>5}  "
+         f"{'smart money':<25}{'flags':<25}note"]
     for r in hits:
-        sym = r["symbol"][:6]
-        layer = (r.get("layer") or "")[:10]
+        sym = r["symbol"][:5]
+        layer = (r.get("layer") or "")[:8]
         last = f"{r.get('last', float('nan')):.2f}" if pd.notna(r.get("last")) else "-"
         ytd = r.get("ytd")
         ytds = f"{ytd*100:+.0f}%" if ytd is not None and pd.notna(ytd) else "-"
-        flags = " ".join(r["flags"])[:29]
-        note = (r.get("note") or "")[:48]
-        L.append(f"{sym:<6}{layer:<11}{last:>8}{ytds:>7}{r['score']:>6.0f}  {flags:<30}{note}")
+        smoney = (r.get("sm_money") or "")[:24]
+        flags = " ".join(r["flags"])[:24]
+        note = (r.get("note") or "")[:24]
+        L.append(f"{sym:<5}{layer:<9}{last:>8}{ytds:>6}{r['score']:>5.0f}  "
+                 f"{smoney:<25}{flags:<25}{note}")
     L.append("```")
     if not hits:
         L.append("\n_(nothing cleared the threshold -- loosen ai_config or quiet tape)_")
