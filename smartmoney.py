@@ -160,7 +160,9 @@ def _scrape_dataroma_stock(sym: str) -> dict | None:
             disp = " ".join(f"{s}{m}" for s, m in adders[:2])
         else:
             disp = " ".join(dict.fromkeys(top_holders[:2]))   # nobody adding -> largest holders
-        return {"dr_count": len(seen), "dr_new": new, "holders": seen, "sm_money": disp[:24]}
+        disp = disp[:19]
+        sm_money = (f"{disp} ·{len(seen)}" if disp else f"·{len(seen)}")   # names + total holder count
+        return {"dr_count": len(seen), "dr_new": new, "holders": seen, "sm_money": sm_money}
     except Exception:
         return None
 

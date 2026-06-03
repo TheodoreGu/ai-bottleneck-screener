@@ -254,22 +254,21 @@ def _write_digest(rows: list[dict], cfg: dict, gov_state: str, args) -> None:
          "SM-13F superinvestors hold | SM-NEW fresh 13F initiation | SM-GOV congress buying | "
          "SINCE'YY first smart-money quarter (top tier)",
          "_Smart money column = superinvestor(s) adding it (Dataroma): `*` new position this "
-         "quarter, `+` adding to existing; else the largest holder._",
+         "quarter, `+` adding to existing; else the largest holder. `·N` = total holders._",
          "",
          "```",
          f"{'SYM':<5}{'layer':<9}{'last':>8}{'YTD':>6}{'scr':>5}  "
-         f"{'smart money':<25}{'flags':<25}note"]
+         f"{'smart money':<24}flags"]
     for r in hits:
         sym = r["symbol"][:5]
         layer = (r.get("layer") or "")[:8]
         last = f"{r.get('last', float('nan')):.2f}" if pd.notna(r.get("last")) else "-"
         ytd = r.get("ytd")
         ytds = f"{ytd*100:+.0f}%" if ytd is not None and pd.notna(ytd) else "-"
-        smoney = (r.get("sm_money") or "")[:24]
-        flags = " ".join(r["flags"])[:24]
-        note = (r.get("note") or "")[:24]
+        smoney = (r.get("sm_money") or "")[:23]
+        flags = " ".join(r["flags"])[:60]
         L.append(f"{sym:<5}{layer:<9}{last:>8}{ytds:>6}{r['score']:>5.0f}  "
-                 f"{smoney:<25}{flags:<25}{note}")
+                 f"{smoney:<24}{flags}")
     L.append("```")
     if not hits:
         L.append("\n_(nothing cleared the threshold -- loosen ai_config or quiet tape)_")
