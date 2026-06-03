@@ -1,0 +1,7 @@
+# transient outputs / caches — never commit
+cache/
+out/
+__pycache__/
+*.pyc
+.venv/
+venv/

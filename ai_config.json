@@ -1,0 +1,34 @@
+{
+  "universe_file": "ai_universe.csv",
+  "benchmark": "SPY",
+
+  "thresholds": {
+    "// ---- 'not yet exponential this year' band ----": 0,
+    "ytd_laggard_max": 0.25,
+    "ytd_parabolic": 0.80,
+    "ytd_floor": -0.40,
+
+    "// ---- smart-money confirmation ----": 0,
+    "inst_pct_floor": 0.40,
+    "inst_pct_full": 0.85,
+    "inst_pct_high": 0.70,
+    "dr_full": 5,
+
+    "// ---- momentum / quality ----": 0,
+    "rsi_overbought": 78.0,
+    "rsi_low": 35.0,
+
+    "digest_min_score": 45.0,
+    "digest_max_rows": 40
+  },
+
+  "scoring_weights": {
+    "smartmoney": 0.40,
+    "laggard": 0.32,
+    "momentum": 0.28
+  },
+
+  "congress_lookback_days": 180,
+  "cache_hours": 12,
+  "fmp_api_key": ""
+}

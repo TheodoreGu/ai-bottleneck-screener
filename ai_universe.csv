@@ -1,0 +1,45 @@
+symbol,layer,note
+# ---- POWER GENERATION / IPPs feeding data centers (electricity = the binding constraint) ----
+CEG,power-gen,Constellation - nuclear fleet signing AI PPAs
+VST,power-gen,Vistra - merchant power + nuclear
+TLN,power-gen,Talen Energy - powers AWS data center campus
+NRG,power-gen,NRG Energy - retail+gen, data center demand
+PEG,power-gen,Public Service Enterprise - nuclear/regulated
+D,power-gen,Dominion - Virginia 'data center alley' utility
+# ---- ELECTRICAL EQUIPMENT / POWER MANAGEMENT (electrify everything) ----
+ETN,electrical,Eaton - electrical gear backlog from data centers
+VRT,electrical,Vertiv - power + thermal for AI racks
+GEV,electrical,GE Vernova - grid + gas turbines for new load
+POWL,electrical,Powell Industries - switchgear, long-cycle orders
+HUBB,electrical,Hubbell - electrical/T&D products
+NVT,electrical,nVent - electrical connection + liquid cooling
+AEIS,electrical,Advanced Energy - precision power for fabs/DC
+# ---- GRID / TRANSMISSION / TRANSFORMERS (interconnection queue bottleneck) ----
+PWR,grid,Quanta Services - grid buildout contractor
+MYRG,grid,MYR Group - electrical T&D construction
+# ---- THERMAL / LIQUID COOLING (rack density bottleneck) ----
+MOD,cooling,Modine - data center thermal management
+FIX,cooling,Comfort Systems - data center HVAC build
+SPXC,cooling,SPX Technologies - cooling/HVAC
+# ---- MEMORY / HBM (the silicon-side bottleneck) ----
+MU,memory,Micron - HBM supply constraint
+# ---- NETWORKING / OPTICAL INTERCONNECT (scale-up/scale-out bottleneck) ----
+ANET,networking,Arista - AI back-end ethernet
+COHR,networking,Coherent - optical/lasers for transceivers
+LITE,networking,Lumentum - optical components
+CIEN,networking,Ciena - DCI optical
+ALAB,networking,Astera Labs - connectivity silicon (PCIe/CXL)
+CRDO,networking,Credo - active electrical cables
+MRVL,networking,Marvell - custom AI silicon + optics
+# ---- NUCLEAR / SMR (the power-supply answer, longer dated) ----
+OKLO,nuclear,Oklo - SMR developer
+SMR,nuclear,NuScale - SMR
+LEU,nuclear,Centrus - enriched uranium supply
+BWXT,nuclear,BWX Technologies - nuclear components
+NNE,nuclear,Nano Nuclear - microreactor dev
+# ---- POWER SEMICONDUCTORS (efficiency at the rack) ----
+MPWR,power-semi,Monolithic Power - power mgmt ICs for AI boards
+POWI,power-semi,Power Integrations - high-voltage power
+# ---- DATA CENTER LANDLORDS (space + power = the lease bottleneck) ----
+DLR,dc-reit,Digital Realty - data center REIT
+EQIX,dc-reit,Equinix - interconnection REIT
