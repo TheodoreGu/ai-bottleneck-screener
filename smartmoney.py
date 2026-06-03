@@ -55,8 +55,18 @@ def _save(path: Path, obj) -> None:
 # --------------------------------------------------------------------------- #
 #  1. institutional ownership  (yfinance, per ticker, cached)
 # --------------------------------------------------------------------------- #
+# fundamental fields grabbed from the SAME .info call (free) for the top-tier blurb
+_FUND_KEYS = ["sector", "industry", "marketCap", "trailingPE", "forwardPE",
+              "revenueGrowth", "earningsGrowth", "grossMargins", "profitMargins",
+              "debtToEquity"]
+
+
 def fetch_institutional(symbols: list[str], cache_hours: float = 24) -> dict[str, dict]:
-    """Return {SYM: {inst_pct, insider_pct}}.  inst_pct is 0..1 of shares."""
+    """Return {SYM: {inst_pct, insider_pct, <fundamentals>}}.  inst_pct is 0..1 of shares.
+
+    Fundamentals (market cap, P/E, growth, margins, sector) ride along on the same
+    yfinance .info call so the top-tier fundamental blurb costs no extra fetches.
+    """
     cache = CACHE_DIR / "ownership.json"
     store = _load(cache) or {}
     now = time.time()
@@ -71,6 +81,10 @@ def fetch_institutional(symbols: list[str], cache_hours: float = 24) -> dict[str
             info = yf.Ticker(sym).info or {}
             rec["inst_pct"] = info.get("heldPercentInstitutions")
             rec["insider_pct"] = info.get("heldPercentInsiders")
+            for k in _FUND_KEYS:
+                rec[k] = info.get(k)
+            summ = info.get("longBusinessSummary") or ""
+            rec["summary1"] = summ.split(". ")[0][:200] if summ else None  # 1st sentence
         except Exception:
             pass
         rec["_ts"] = now
@@ -84,42 +98,143 @@ def fetch_institutional(symbols: list[str], cache_hours: float = 24) -> dict[str
 # --------------------------------------------------------------------------- #
 #  2. Dataroma superinvestors  (scrape per ticker, cached 7d -> 13F is quarterly)
 # --------------------------------------------------------------------------- #
-def _scrape_dataroma_count(sym: str) -> int | None:
-    """Count distinct tracked superinvestors holding `sym` on dataroma.com.
+# stock.php rows look like:
+#   <a href="/m/holdings.php?m=LPC" ...>Manager</a> ... <td class="buy">Add 40.65%</td>
+# A brand-new position this quarter shows activity text == "Buy" (Add/Reduce/Sell otherwise).
+_HOLDER_RE = re.compile(
+    r'holdings\.php\?m=([A-Za-z0-9]+)"[^>]*>.*?<td class="(buy|sell)">\s*([^<]*?)\s*</td>',
+    re.S)
 
-    The stock page lists each holder as a link to /m/holdings.php?m=<MGR>.
-    Counting distinct manager codes = number of tracked 13F investors in it.
-    Returns None on fetch failure (so we can distinguish 'unknown' from 'zero').
+
+def _scrape_dataroma_stock(sym: str) -> dict | None:
+    """Return {dr_count, dr_new, holders:[mgr,...]} for `sym`, or None on failure.
+
+    dr_count = distinct tracked superinvestors holding it.
+    dr_new   = how many INITIATED a brand-new position this quarter (activity 'Buy').
+    holders  = manager codes (used by fetch_first_included to date the inception).
     """
     url = f"https://www.dataroma.com/m/stock.php?sym={sym}"
     try:
         r = requests.get(url, headers=_UA, timeout=25)
         if r.status_code != 200 or len(r.text) < 500:
             return None
-        codes = set(re.findall(r"holdings\.php\?m=([A-Za-z0-9]+)", r.text))
-        return len(codes)
+        holders, new = [], 0
+        for mgr, _cls, act in _HOLDER_RE.findall(r.text):
+            holders.append(mgr)
+            if act.strip().lower() == "buy":          # exact 'Buy' = initiation (vs 'Add x%')
+                new += 1
+        # fall back to a plain code count if the structured parse found nothing
+        if not holders:
+            codes = set(re.findall(r"holdings\.php\?m=([A-Za-z0-9]+)", r.text))
+            return {"dr_count": len(codes), "dr_new": 0, "holders": list(codes)}
+        seen = list(dict.fromkeys(holders))
+        return {"dr_count": len(seen), "dr_new": new, "holders": seen}
     except Exception:
         return None
 
 
 def fetch_superinvestors(symbols: list[str], cache_hours: float = 168) -> dict[str, dict]:
-    """Return {SYM: {dr_count}}.  Cached a week (13F filings are quarterly)."""
+    """Return {SYM: {dr_count, dr_new, holders}}.  Cached a week (13F is quarterly)."""
     cache = CACHE_DIR / "dataroma.json"
     store = _load(cache) or {}
     now = time.time()
     out: dict[str, dict] = {}
     for sym in symbols:
         rec = store.get(sym)
-        if rec and (now - rec.get("_ts", 0)) < cache_hours * 3600:
+        if rec and (now - rec.get("_ts", 0)) < cache_hours * 3600 and "holders" in rec:
             out[sym] = rec
             continue
-        cnt = _scrape_dataroma_count(sym)
-        rec = {"dr_count": cnt, "_ts": now}
+        scraped = _scrape_dataroma_stock(sym) or {"dr_count": None, "dr_new": None, "holders": []}
+        rec = {**scraped, "_ts": now}
         store[sym] = rec
         out[sym] = rec
         time.sleep(0.4)  # be gentle with dataroma
     _save(cache, store)
     return out
+
+
+def _parse_first_quarter(html: str) -> tuple[int, int] | None:
+    """Earliest (year, quarter) in a hist.php table; the oldest row = first reported."""
+    quarters = re.findall(r"(20\d\d)\s*(?:&nbsp;?\s*)?Q([1-4])", html)
+    if not quarters:
+        return None
+    ys = [(int(y), int(q)) for y, q in quarters]
+    return min(ys)
+
+
+def fetch_first_included(sym: str, holders: list[str], cache_hours: float = 720) -> dict | None:
+    """Earliest quarter `sym` appears in any current holder's history.
+
+    'First time smart money included it' (among tracked superinvestors still holding).
+    One hist.php fetch per holder, cached 30 days. Call this ONLY for the top tier.
+    Returns {sm_first: 'YYYY Qn', sm_first_sort: [y,q]} or None.
+    """
+    if not holders:
+        return None
+    cache = CACHE_DIR / "dataroma_hist.json"
+    store = _load(cache) or {}
+    now = time.time()
+    earliest: tuple[int, int] | None = None
+    for mgr in holders:
+        key = f"{mgr}:{sym}"
+        rec = store.get(key)
+        if not (rec and (now - rec.get("_ts", 0)) < cache_hours * 3600):
+            yq = None
+            try:
+                r = requests.get(f"https://www.dataroma.com/m/hist/hist.php?f={mgr}&s={sym}",
+                                 headers=_UA, timeout=25)
+                if r.status_code == 200:
+                    yq = _parse_first_quarter(r.text)
+            except Exception:
+                yq = None
+            rec = {"yq": list(yq) if yq else None, "_ts": now}
+            store[key] = rec
+            time.sleep(0.35)
+        if rec.get("yq"):
+            yq = tuple(rec["yq"])
+            if earliest is None or yq < earliest:
+                earliest = yq
+    _save(cache, store)
+    if earliest is None:
+        return None
+    return {"sm_first": f"{earliest[0]} Q{earliest[1]}", "sm_first_sort": list(earliest)}
+
+
+# --------------------------------------------------------------------------- #
+#  fundamental blurb (uses fields already grabbed in fetch_institutional)
+# --------------------------------------------------------------------------- #
+def _money(x) -> str:
+    if x is None:
+        return "?"
+    for d, s in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(x) >= d:
+            return f"${x / d:.1f}{s}"
+    return f"${x:.0f}"
+
+
+def fundamentals_blurb(rec: dict | None) -> str:
+    """One-line factual fundamentals from the cached .info fields. No narrative invented."""
+    if not rec:
+        return ""
+    bits = []
+    if rec.get("marketCap"):
+        bits.append(f"cap {_money(rec['marketCap'])}")
+    pe = rec.get("forwardPE") or rec.get("trailingPE")
+    if pe and pe > 0:
+        bits.append(f"{'fwd' if rec.get('forwardPE') else 'ttm'}P/E {pe:.0f}")
+    rg = rec.get("revenueGrowth")
+    if rg is not None:
+        bits.append(f"rev {rg * 100:+.0f}%")
+    eg = rec.get("earningsGrowth")
+    if eg is not None:
+        bits.append(f"eps {eg * 100:+.0f}%")
+    pm = rec.get("profitMargins")
+    if pm is not None:
+        bits.append(f"net mgn {pm * 100:.0f}%")
+    de = rec.get("debtToEquity")
+    if de is not None:
+        bits.append(f"D/E {de / 100:.1f}" if de > 5 else f"D/E {de:.1f}")  # yf reports as %
+    return " · ".join(bits)
 
 
 # --------------------------------------------------------------------------- #
@@ -234,10 +349,17 @@ def smartmoney_score(inst: dict | None, supr: dict | None, gov: dict | None,
     if dc is not None:
         fields["dr_count"] = dc
         s = max(0.0, min(100.0, dc / max(1, th["dr_full"]) * 100))
+        # fresh conviction: a brand-new superinvestor position this quarter nudges it up
+        dn = (supr or {}).get("dr_new") or 0
+        if dn:
+            fields["dr_new"] = dn
+            s = min(100.0, s + 15)
         parts.append(s)
         if dc > 0:
-            note_bits.append(f"13F{dc}")
+            note_bits.append(f"13F{dc}" + (f"(+{dn} new)" if dn else ""))
             flags.append("SM-13F")
+        if dn:
+            flags.append("SM-NEW")
 
     # congress: net recent buys; each net buy worth a chunk, capped
     if gov:

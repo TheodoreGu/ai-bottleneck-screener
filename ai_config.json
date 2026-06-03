@@ -19,7 +19,11 @@
     "rsi_low": 35.0,
 
     "digest_min_score": 45.0,
-    "digest_max_rows": 40
+    "digest_max_rows": 40,
+
+    "// ---- stage-2 tenure + fundamentals tier ----": 0,
+    "fundamentals_top_n": 6,
+    "fundamentals_max": 12
   },
 
   "scoring_weights": {

@@ -164,6 +164,7 @@ def run(cfg: dict, args) -> None:
         if df is None or df.empty:
             continue
         row = dict(u)
+        row["thesis"] = u.get("note", "")        # keep the universe note (score overwrites 'note')
         row.update(signals.technicals(df, bench_df))
         row["ytd"] = _ytd(df)
 
@@ -185,6 +186,29 @@ def run(cfg: dict, args) -> None:
         rows.append(row)
 
     rows.sort(key=lambda r: r["score"], reverse=True)
+
+    # ---- Stage 2: deeper enrichment for the TOP TIER only (gentle on Dataroma) ----
+    # tier = every LAGGARD + the top-N standouts by score; capped.
+    standout_n = th.get("fundamentals_top_n", 6)
+    tier = [r for r in rows if "LAGGARD" in r["flags"]]
+    for r in rows[:standout_n]:
+        if r not in tier:
+            tier.append(r)
+    tier = tier[: th.get("fundamentals_max", 12)]
+    print(f"[stage2] tenure + fundamentals for {len(tier)} top-tier names")
+    for r in tier:
+        sym = r["symbol"]
+        holders = (supr.get(sym) or {}).get("holders") or []
+        fi = smartmoney.fetch_first_included(sym, holders)
+        if fi:
+            r.update(fi)
+        r["_fund"] = smartmoney.fundamentals_blurb(inst.get(sym))
+        irec = inst.get(sym) or {}
+        r["sector"] = irec.get("sector")
+        r["_tier"] = True
+        if fi:                                   # compact tenure flag; full date in the fundamentals section
+            r["flags"] = r["flags"] + [f"SINCE'{str(fi['sm_first_sort'][0])[2:]}"]
+
     _write_full(rows)
     _write_digest(rows, cfg, gov_state, args)
 
@@ -228,8 +252,9 @@ def _write_digest(rows: list[dict], cfg: dict, gov_state: str, args) -> None:
          f"_(congress: {gov_state})_",
          "",
          "Flags: LAGGARD not-yet-run | PARABOLIC already ran (avoid) | UPTRD >50&200d | "
-         "RS+/- vs SPY | OB overbought | 52H near high | "
-         "SM-INST high institutional | SM-13F superinvestors hold | SM-GOV congress buying",
+         "RS+/- vs SPY | OB overbought | 52H near high | SM-INST high institutional | "
+         "SM-13F superinvestors hold | SM-NEW fresh 13F initiation | SM-GOV congress buying | "
+         "SINCE'YY first smart-money quarter (top tier)",
          "",
          "```",
          f"{'SYM':<6}{'layer':<11}{'last':>8}{'YTD':>7}{'score':>6}  {'flags':<30}note"]
@@ -245,6 +270,23 @@ def _write_digest(rows: list[dict], cfg: dict, gov_state: str, args) -> None:
     L.append("```")
     if not hits:
         L.append("\n_(nothing cleared the threshold -- loosen ai_config or quiet tape)_")
+
+    # ---- fundamental summary for the laggard + standout tier ----
+    tier = [r for r in rows if r.get("_tier")]
+    if tier:
+        L.append("")
+        L.append("## Fundamentals — laggard + standout tier")
+        for r in tier:
+            ytd = r.get("ytd")
+            ytds = f"{ytd*100:+.0f}%" if ytd is not None and pd.notna(ytd) else "-"
+            since = f" · SM since {r['sm_first']}" if r.get("sm_first") else " · SM since n/a"
+            tags = " ".join(t for t in r["flags"]
+                            if t in ("LAGGARD", "PARABOLIC", "UPTRD", "SM-INST", "SM-13F",
+                                     "SM-NEW", "SM-GOV") or t.startswith("RS"))
+            fund = r.get("_fund") or "_fundamentals n/a_"
+            L.append(f"- **{r['symbol']}** {r.get('layer','')} · score {r['score']:.0f} · "
+                     f"YTD {ytds}{since} · {tags}")
+            L.append(f"  {fund} — {r.get('thesis','')}")
 
     text = "\n".join(L)
     dated = OUT / f"ai_{today:%Y-%m-%d}_digest.md"
