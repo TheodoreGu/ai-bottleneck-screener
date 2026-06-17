@@ -83,7 +83,7 @@ def _signal(df: pd.DataFrame) -> tuple[str, float, str] | None:
     return sig, last, close.index[-1].date().isoformat()
 
 
-def run(symbols: list[str], layers: dict, period: str, reset: bool) -> None:
+def run(symbols: list[str], layers: dict, period: str, reset: bool, report_only: bool = False) -> None:
     prices = sources.fetch_prices(list(dict.fromkeys(symbols + ["SPY"])), period=period)
     spy = prices["SPY"]["Close"].dropna() if "SPY" in prices else pd.Series(dtype=float)
 
@@ -94,6 +94,16 @@ def run(symbols: list[str], layers: dict, period: str, reset: bool) -> None:
             r = _signal(df)
             if r:
                 sigs[s] = r
+
+    # ---- read-only: re-mark the committed ledger to live prices, never mutate state ----
+    if report_only:
+        if not STATE.exists():
+            print("[tracker] report-only but no state yet — run once to inception first.")
+            return
+        inception = json.loads(STATE.read_text(encoding="utf-8"))["inception"]
+        print(f"[tracker] report-only | inception {inception}")
+        _report(_read_csv(OPEN_F), _read_csv(CLOSED_F), inception, sigs, prices, spy)
+        return
 
     fresh = reset or not STATE.exists()
     open_rows = [] if fresh else _read_csv(OPEN_F)
@@ -247,6 +257,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--period", default="2y", help="history window for the 50/200d signal")
     ap.add_argument("--reset", action="store_true", help="wipe ledger and re-inception today")
+    ap.add_argument("--report-only", action="store_true",
+                    help="re-mark the committed ledger to live prices without changing state")
     ap.add_argument("--symbols", nargs="+", help="ad-hoc list; default = ai_universe.csv")
     a = ap.parse_args()
     if a.symbols:
@@ -255,7 +267,7 @@ def main() -> None:
         uni = load_universe(ROOT / "ai_universe.csv")
         symbols = [u["symbol"] for u in uni]
         layers = {u["symbol"]: u["layer"] for u in uni}
-    run(symbols, layers, a.period, a.reset)
+    run(symbols, layers, a.period, a.reset, a.report_only)
 
 
 if __name__ == "__main__":
